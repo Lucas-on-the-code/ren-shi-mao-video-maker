@@ -1,0 +1,9 @@
+/* ZCOOL KuaiLe subset for lyric text. Source: Google Fonts. */
+@font-face {
+  font-family: 'ZCOOL KuaiLe';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(fonts/zcool-kuaile-miao.woff2) format('woff2');
+  unicode-range: U+55b5;
+}

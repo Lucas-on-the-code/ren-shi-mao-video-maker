@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MIDI 小人物视频生成器</title>
+    <link rel="stylesheet" href="fonts.css" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="workspace">
+        <div class="stage-wrap">
+          <canvas id="stage" width="3840" height="2160" aria-label="视频预览画布"></canvas>
+        </div>
+
+        <div class="transport">
+          <button id="playBtn" type="button" disabled>播放预览</button>
+          <button id="stopBtn" type="button" disabled>停止</button>
+          <button id="renderBtn" type="button" disabled>导出 MOV</button>
+          <label class="time">
+            <span id="timeText">00:00.00 / 00:00.00</span>
+            <input id="seek" type="range" min="0" max="0" value="0" step="0.01" disabled />
+          </label>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <header>
+          <h1>MIDI 小人物视频生成器</h1>
+          <p>每个 MIDI 轨道对应一个小人物；无音用闭嘴图，有音用张嘴图。</p>
+        </header>
+
+        <section class="controls">
+          <label class="file">
+            <span>MIDI 文件</span>
+            <input id="midiFile" type="file" accept=".mid,.midi,audio/midi" />
+          </label>
+
+          <div class="grid">
+            <label>
+              <span>视频宽</span>
+              <input id="videoWidth" type="number" min="320" max="3840" value="3840" />
+            </label>
+            <label>
+              <span>视频高</span>
+              <input id="videoHeight" type="number" min="240" max="2160" value="2160" />
+            </label>
+            <label>
+              <span>帧率</span>
+              <input id="fps" type="number" min="12" max="60" value="60" />
+            </label>
+            <label>
+              <span>音量</span>
+              <input id="volume" type="range" min="0" max="1" value="0.25" step="0.01" />
+            </label>
+          </div>
+
+          <label class="file background-file">
+            <span>背景图片</span>
+            <input id="backgroundFile" type="file" accept="image/*" />
+          </label>
+
+          <label class="check">
+            <input id="transparentExport" type="checkbox" />
+            <span>导出无背景透明视频</span>
+          </label>
+
+          <div class="preview default-images">
+            <label>
+              <span>默认闭嘴图</span>
+              <input id="defaultClosedImage" type="file" accept="image/*" />
+              <div class="swatch" id="defaultClosedSwatch">未选择</div>
+            </label>
+            <label>
+              <span>默认张嘴图</span>
+              <input id="defaultOpenImage" type="file" accept="image/*" />
+              <div class="swatch" id="defaultOpenSwatch">未选择</div>
+            </label>
+          </div>
+
+          <div class="grid lyric-controls">
+            <label>
+              <span>歌词颜色</span>
+              <input id="lyricColor" type="color" value="#171b1f" />
+            </label>
+            <label>
+              <span>歌词字体</span>
+              <select id="lyricFont">
+                <option value='"ZCOOL KuaiLe", system-ui, sans-serif' selected>站酷快乐体</option>
+                <option value="system-ui, sans-serif">系统黑体</option>
+                <option value='"PingFang SC", "Microsoft YaHei", sans-serif'>苹方 / 微软雅黑</option>
+                <option value='serif'>宋体风格</option>
+                <option value='cursive'>手写风格</option>
+                <option value='monospace'>等宽字体</option>
+              </select>
+            </label>
+            <label class="wide">
+              <span>歌词高度</span>
+              <input id="lyricHeight" type="range" min="-420" max="220" value="0" step="1" />
+            </label>
+          </div>
+
+          <div class="status" id="status">请选择一个 MIDI 文件。</div>
+          <a id="downloadLink" class="download-link" hidden>下载上次导出的视频</a>
+        </section>
+
+        <section>
+          <div class="tracks-title">
+            <h2>轨道人物</h2>
+            <button id="layoutBtn" type="button" disabled>自动排布</button>
+          </div>
+          <div id="tracks" class="tracks"></div>
+        </section>
+      </aside>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
