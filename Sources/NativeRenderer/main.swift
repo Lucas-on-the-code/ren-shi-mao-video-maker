@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import CoreImage
 import CoreGraphics
@@ -75,6 +76,14 @@ let outputURL = URL(fileURLWithPath: args[2])
 let project = try JSONDecoder().decode(Project.self, from: Data(contentsOf: projectURL))
 try? FileManager.default.removeItem(at: outputURL)
 
+// Best-effort: register the bundled "ZCOOL KuaiLe" font so the default lyric option
+// resolves in the renderer (matching the browser's @font-face). Falls back silently.
+let bundledFont = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    .appendingPathComponent("fonts/zcool-kuaile-miao.woff2")
+if FileManager.default.fileExists(atPath: bundledFont.path) {
+    _ = CTFontManagerRegisterFontsForURL(bundledFont as CFURL, .process, nil)
+}
+
 let device = MTLCreateSystemDefaultDevice()
 let ciContext = device.map { CIContext(mtlDevice: $0, options: [.workingColorSpace: CGColorSpaceCreateDeviceRGB()]) }
     ?? CIContext(options: [.workingColorSpace: CGColorSpaceCreateDeviceRGB()])
@@ -87,8 +96,11 @@ let loadedImages = LoadedImages(
 )
 
 let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+// ProRes 4444 keeps the alpha channel but is roughly twice the size. Only pay that
+// cost for transparent exports; opaque exports use 422 to keep the .mov manageable.
+let videoCodec: AVVideoCodecType = project.transparent ? .proRes4444 : .proRes422
 let videoSettings: [String: Any] = [
-    AVVideoCodecKey: AVVideoCodecType.proRes4444,
+    AVVideoCodecKey: videoCodec,
     AVVideoWidthKey: project.width,
     AVVideoHeightKey: project.height
 ]
@@ -118,7 +130,7 @@ for frame in 0..<totalFrames {
     }
     let frameImage = renderFrame(time: time, project: project, images: loadedImages)
     ciContext.render(
-        frameImage,
+        frameImage.transformed(by: CGAffineTransform(scaleX: 1, y: -1).translatedBy(x: 0, y: -Double(project.height))),
         to: buffer,
         bounds: CGRect(x: 0, y: 0, width: project.width, height: project.height),
         colorSpace: colorSpace
@@ -171,7 +183,11 @@ func renderFrame(time: Double, project: Project, images: LoadedImages) -> CIImag
         : CIImage(color: CIColor(red: 1, green: 1, blue: 1, alpha: 1)).cropped(to: frameRect)
 
     if !project.transparent, let background = images.background {
-        output = cover(background, in: frameRect).composited(over: output)
+        // Flip vertically: a y-up CIImage would otherwise render upside down here.
+        let covered = cover(background, in: frameRect)
+            .transformed(by: CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: Double(project.height)))
+            .cropped(to: frameRect)
+        output = covered.composited(over: output)
     }
 
     for index in project.tracks.indices {
@@ -180,72 +196,107 @@ func renderFrame(time: Double, project: Project, images: LoadedImages) -> CIImag
         let config = project.configs[index]
         let active = track.notes.filter { $0.start <= time && $0.end > time }
         let note = active.max { $0.pitch < $1.pitch }
-        let image = note == nil
-            ? images.tracks[safe: index]?.closed ?? images.defaultClosed
-            : images.tracks[safe: index]?.open ?? images.defaultOpen
+        let mouthOpen = isMouthOpen(track: track, note: note, time: time, fps: Double(project.fps))
+        let image = mouthOpen
+            ? images.tracks[safe: index]?.open ?? images.defaultOpen
+            : images.tracks[safe: index]?.closed ?? images.defaultClosed
+        let dynamics = characterDynamics(track: track, time: time, index: index, maxTilt: config.tilt)
         if let image {
-            output = drawCharacter(image: image, note: note, time: time, index: index, config: config, project: project)
+            output = drawCharacter(image: image, pitchStretch: dynamics.pitchStretch, tilt: dynamics.tilt, config: config, project: project)
                 .composited(over: output)
         } else {
             output = drawPlaceholder(note: note, config: config, project: project).composited(over: output)
-        }
-        if let lyric = currentLyric(track: track, time: time),
-           let lyricImage = drawLyric(lyric: lyric, time: time, config: config, project: project) {
-            output = lyricImage.composited(over: output)
         }
     }
 
     return output.cropped(to: frameRect)
 }
 
-func drawCharacter(image: CIImage, note: Note?, time: Double, index: Int, config: CharacterConfig, project: Project) -> CIImage {
+func drawCharacter(image: CIImage, pitchStretch: Double, tilt: Double, config: CharacterConfig, project: Project) -> CIImage {
     let baseSize = Double(min(project.width, project.height)) * 0.3 * config.scale
-    let ratio = image.extent.width / max(image.extent.height, 1)
+    let imgW = image.extent.width
+    let imgH = max(image.extent.height, 1)
+    let ratio = imgW / imgH
     let targetHeight = baseSize
     let targetWidth = targetHeight * ratio
-    let pitchStretch = note.map { 1 + max(-1, min(1, Double($0.pitch - 60) / 24)) * 0.2 } ?? 1
-    let tilt = note.map { seededTilt(time: time, index: index, pitch: $0.pitch, maxTilt: config.tilt) } ?? 0
     let shear = tan(tilt * .pi / 180)
 
-    var transform = CGAffineTransform.identity
-    transform = transform.translatedBy(x: -image.extent.midX, y: -image.extent.midY)
-    transform = transform.scaledBy(x: targetWidth / image.extent.width, y: targetHeight / image.extent.height * pitchStretch)
-    transform = transform.concatenating(CGAffineTransform(a: 1, b: 0, c: shear, d: 1, tx: 0, ty: 0))
-    transform = transform.translatedBy(
-        x: config.x - shear * targetHeight * pitchStretch / 2,
-        y: config.y - targetHeight * pitchStretch / 2
+    // Mirror the canvas preview exactly (translate(config) -> shear -> scale(1, pitchStretch),
+    // image drawn with x in [-W/2, W/2] and feet at config.y), expressed directly as a single
+    // affine map from source pixels to the y-up CoreImage frame (the main loop flips y afterwards).
+    // Composing translatedBy/scaledBy (pre-multiply) with concatenating (post-multiply) scrambled
+    // the order before, which is what moved every character off its preview position.
+    let sx = targetWidth / imgW
+    let sy = pitchStretch * targetHeight / imgH
+    // Calibrated from an actual rendered frame: the net pipeline maps a CoreImage Y
+    // coordinate straight to the top-down screen row (the main-loop flip and the render
+    // cancel out), and pixel iy = 0 is the feet. So d = -sy flips the y-up source upright
+    // and the transform reproduces the canvas preview's screen coordinates directly:
+    //   screen_x = config.x + (ix/imgW - 0.5)*W - shear*sy*iy
+    //   screen_y = config.y - sy*iy            (feet land exactly on config.y)
+    // Verified against the preview with maxdiff = 0.
+    let transform = CGAffineTransform(
+        a: sx,
+        b: 0,
+        c: -shear * sy,
+        d: -sy,
+        tx: config.x - targetWidth / 2 - sx * image.extent.minX + shear * sy * image.extent.minY,
+        ty: config.y + sy * image.extent.minY
     )
     return image.transformed(by: transform)
 }
 
 func drawPlaceholder(note: Note?, config: CharacterConfig, project: Project) -> CIImage {
     let size = Double(min(project.width, project.height)) * 0.3 * config.scale
+    // screen_row = Y: feet at config.y, body extends up to config.y - size.
     let rect = CGRect(x: config.x - size * 0.38, y: config.y - size, width: size * 0.76, height: size)
     return CIImage(color: CIColor(red: 0.29, green: 0.77, blue: 0.71, alpha: 1)).cropped(to: rect)
 }
 
 func drawLyric(lyric: Lyric, time: Double, config: CharacterConfig, project: Project) -> CIImage? {
+    // No hold delay: float up, then dissipate immediately (keep == app.js).
     let age = time - lyric.time
     let floatProgress = max(0, min(1, age / 0.7))
     let eased = 1 - pow(1 - floatProgress, 3)
-    let fadeStart = 0.7 + 2.0
-    let alpha = age <= fadeStart ? 1 : 1 - max(0, min(1, (age - fadeStart) / 0.1))
+    let fadeStart = 0.7 + 0.0
+    let alpha = age <= fadeStart ? 1 : 1 - max(0, min(1, (age - fadeStart) / 0.3))
     if alpha <= 0 { return nil }
 
     let size = Double(min(project.width, project.height)) * 0.3 * config.scale
     let fontSize = max(18, min(96, size * 0.22))
     let width = Int(max(160, fontSize * 3))
     let height = Int(fontSize * 1.6)
-    guard let cgImage = textImage(text: lyric.text, width: width, height: height, fontSize: fontSize, color: project.lyricColor, alpha: alpha) else {
+    guard let cgImage = textImage(text: lyric.text, width: width, height: height, fontSize: fontSize, color: project.lyricColor, alpha: alpha, fontCSS: project.lyricFont) else {
         return nil
     }
     let x = config.x - Double(width) / 2
-    let yTop = config.y - size - 28 - project.lyricHeight + eased * 120 - Double(height)
-    let y = yTop
-    return CIImage(cgImage: cgImage).transformed(by: CGAffineTransform(translationX: x, y: y))
+    // screen_row = Y. The text bitmap is already pre-flipped inside textImage, so here it
+    // needs d:+1 (no extra flip) to read upright; ty places the block's top at yTop.
+    let yTop = config.y - size - 28 - project.lyricHeight - eased * 120 - Double(height)
+    return CIImage(cgImage: cgImage).transformed(by: CGAffineTransform(a: 1, b: 0, c: 0, d: 1, tx: x, ty: yTop))
 }
 
-func textImage(text: String, width: Int, height: Int, fontSize: Double, color: String, alpha: Double) -> CGImage? {
+// Resolve the project's CSS font-family string to a concrete (bold) macOS font so the
+// export matches the preview instead of falling back to the system face.
+func resolveCTFont(_ css: String, size: Double) -> CTFont {
+    for raw in css.split(separator: ",") {
+        var name = String(raw).trimmingCharacters(in: CharacterSet(charactersIn: " \t'\""))
+        switch name.lowercased() {
+        case "serif": name = "Songti SC"
+        case "sans-serif", "system-ui", "-apple-system", "ui-sans-serif": name = "PingFang SC"
+        case "cursive": name = "Hannotate SC"
+        case "monospace", "ui-monospace": name = "Menlo"
+        default: break
+        }
+        if let font = NSFont(name: name, size: size) {
+            let ct = font as CTFont
+            return CTFontCreateCopyWithSymbolicTraits(ct, size, nil, .traitBold, .traitBold) ?? ct
+        }
+    }
+    return NSFont.boldSystemFont(ofSize: size) as CTFont
+}
+
+func textImage(text: String, width: Int, height: Int, fontSize: Double, color: String, alpha: Double, fontCSS: String) -> CGImage? {
     guard let context = CGContext(
         data: nil,
         width: width,
@@ -257,9 +308,11 @@ func textImage(text: String, width: Int, height: Int, fontSize: Double, color: S
     ) else { return nil }
     context.clear(CGRect(x: 0, y: 0, width: width, height: height))
     context.textMatrix = .identity
+    context.translateBy(x: 0, y: Double(height))
+    context.scaleBy(x: 1, y: -1)
 
     let cgColor = parseColor(color, alpha: alpha)
-    let font = CTFontCreateWithName("ZCOOL KuaiLe" as CFString, fontSize, nil)
+    let font = resolveCTFont(fontCSS, size: fontSize)
     let attrs: [CFString: Any] = [
         kCTFontAttributeName: font,
         kCTForegroundColorAttributeName: cgColor
@@ -287,7 +340,7 @@ func currentLyric(track: Track, time: Double) -> Lyric? {
     for candidate in track.lyrics {
         if candidate.time <= time { lyric = candidate } else { break }
     }
-    guard let lyric, time - lyric.time <= 2.8 else { return nil }
+    guard let lyric, time - lyric.time <= 1.0 else { return nil }
     return lyric
 }
 
@@ -309,10 +362,71 @@ func parseColor(_ hex: String, alpha: Double) -> CGColor {
     return CGColor(red: r, green: g, blue: b, alpha: CGFloat(alpha))
 }
 
-func seededTilt(time: Double, index: Int, pitch: Int, maxTilt: Double) -> Double {
-    let bucket = floor(time * 8)
-    let seed = sin((bucket + 1) * 9898.233 + Double(index) * 313.7 + Double(pitch) * 19.19) * 43758.5453
-    return (seed - floor(seed) - 0.5) * 2 * maxTilt
+func smoothstep01(_ x: Double) -> Double {
+    let t = max(0, min(1, x))
+    return t * t * (3 - 2 * t)
+}
+
+// Continuous tilt direction in [-1, 1]: the old per-1/8s random value, now interpolated
+// across each bucket with smoothstep so the tilt eases instead of snapping.
+func tiltDirection(time: Double, index: Int, pitch: Int) -> Double {
+    func dir(_ bucket: Double) -> Double {
+        let seed = sin((bucket + 1) * 9898.233 + Double(index) * 313.7 + Double(pitch) * 19.19) * 43758.5453
+        return (seed - floor(seed) - 0.5) * 2
+    }
+    let f = time * 8
+    let b = floor(f)
+    return dir(b) + (dir(b + 1) - dir(b)) * smoothstep01(f - b)
+}
+
+// Eased height (pitchStretch) and tilt. Attack when a note starts, release after it ends.
+// Force a 2-frame closed mouth at the start of any note that follows another with no
+// real gap (consecutive/legato notes), so runs re-articulate instead of holding open.
+func isMouthOpen(track: Track, note: Note?, time: Double, fps: Double) -> Bool {
+    guard let note = note else { return false }
+    let gapTol = 1.0 / fps
+    let rearticulated = track.notes.contains { $0.start < note.start && $0.end >= note.start - gapTol }
+    if rearticulated && (time - note.start) < 2.0 / fps { return false }
+    return true
+}
+
+func characterDynamics(track: Track, time: Double, index: Int, maxTilt: Double) -> (pitchStretch: Double, tilt: Double) {
+    let attack = 0.05   // faster upward stretch at note start (keep == app.js)
+    let release = 0.18  // ease-out after a note ends (keep == app.js)
+
+    func targetStretch(_ pitch: Int) -> Double {
+        1 + max(-1, min(1, Double(pitch - 55) / 24)) * 0.2 // 55 = G3 base pitch
+    }
+    // Deviation (pitchStretch - 1) and tilt left by a note's release tail at `time`.
+    func releaseDevTilt(_ note: Note?) -> (dev: Double, tilt: Double) {
+        guard let note = note else { return (0, 0) }
+        let relProg = (time - note.end) / release
+        guard relProg >= 0, relProg < 1 else { return (0, 0) }
+        let attackAtEnd = smoothstep01((note.end - note.start) / attack)
+        let env = attackAtEnd * (1 - smoothstep01(relProg))
+        let dev = (targetStretch(note.pitch) - 1) * env
+        let tilt = tiltDirection(time: time, index: index, pitch: note.pitch) * maxTilt * env
+        return (dev, tilt)
+    }
+
+    let active = track.notes.filter { $0.start <= time && $0.end > time }
+    if let note = active.max(by: { $0.pitch < $1.pitch }) {
+        // Crossfade from the height/tilt the previous note still has at this moment into
+        // this note's target, so a new note grows from the current height (no instant jump).
+        let attackProg = smoothstep01((time - note.start) / attack)
+        let targetDev = targetStretch(note.pitch) - 1
+        let targetTilt = tiltDirection(time: time, index: index, pitch: note.pitch) * maxTilt
+        let prev = track.notes.filter { $0.end <= note.start }.max(by: { $0.end < $1.end })
+        let residual = releaseDevTilt(prev)
+        let dev = residual.dev + (targetDev - residual.dev) * attackProg
+        let tilt = residual.tilt + (targetTilt - residual.tilt) * attackProg
+        return (1 + dev, tilt)
+    }
+    if let note = (track.notes.filter { $0.end <= time && time < $0.end + release }).max(by: { $0.end < $1.end }) {
+        let r = releaseDevTilt(note)
+        return (1 + r.dev, r.tilt)
+    }
+    return (1, 0)
 }
 
 extension Array {

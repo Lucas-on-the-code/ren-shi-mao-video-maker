@@ -257,7 +257,7 @@ function drawServerCharacter(ctx, canvas, config, assets, note, time, index) {
   const trackAssets = assets.tracks[index] || {};
   const image = note ? trackAssets.open || assets.defaultOpen : trackAssets.closed || assets.defaultClosed;
   const baseSize = Math.min(canvas.width, canvas.height) * CHARACTER_SIZE_RATIO * config.scale;
-  const pitchStretch = note ? 1 + clamp((note.pitch - 60) / 24, -1, 1) * 0.2 : 1;
+  const pitchStretch = note ? 1 + clamp((note.pitch - 55) / 24, -1, 1) * 0.2 : 1; // 55 = G3 base pitch
   const tilt = note ? seededTilt(time, index, note.pitch, config.tilt) : 0;
 
   ctx.save();

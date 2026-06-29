@@ -48,8 +48,8 @@ let restoring = false;
 
 const CHARACTER_SIZE_RATIO = 0.3;
 const LYRIC_FLOAT_DURATION = 0.7;
-const LYRIC_HOLD_DURATION = 2;
-const LYRIC_FADE_DURATION = 0.1;
+const LYRIC_HOLD_DURATION = 0;
+const LYRIC_FADE_DURATION = 0.3;
 const LYRIC_TOTAL_DURATION = LYRIC_FLOAT_DURATION + LYRIC_HOLD_DURATION + LYRIC_FADE_DURATION;
 const STORE_NAME = "midi-character-video-state-v1";
 const FILE_KEYS = ["midi", "background", "defaultClosed", "defaultOpen"];
@@ -372,7 +372,6 @@ function drawFrame(time, options = {}) {
     const active = activeNotes(track, time);
     const note = active.length ? active.reduce((highest, current) => (current.pitch > highest.pitch ? current : highest)) : null;
     drawCharacter(config, note, time, index);
-    drawLyric(config, track, time);
   });
 }
 
@@ -415,10 +414,10 @@ function drawEmpty() {
 }
 
 function drawCharacter(config, note, time, index) {
-  const image = note ? config.openImage || defaultOpenImage : config.closedImage || defaultClosedImage;
+  const mouthOpen = isMouthOpen(song && song.tracks[index], note, time);
+  const image = mouthOpen ? config.openImage || defaultOpenImage : config.closedImage || defaultClosedImage;
   const baseSize = Math.min(els.canvas.width, els.canvas.height) * CHARACTER_SIZE_RATIO * config.scale;
-  const pitchStretch = note ? 1 + clamp((note.pitch - 60) / 24, -1, 1) * 0.2 : 1;
-  const tilt = note ? seededTilt(time, index, note.pitch, config.tilt) : 0;
+  const { pitchStretch, tilt } = characterDynamics(song && song.tracks[index], time, index, config.tilt);
 
   ctx.save();
   ctx.translate(config.x, config.y);
@@ -431,9 +430,20 @@ function drawCharacter(config, note, time, index) {
     const width = height * ratio;
     ctx.drawImage(image, -width / 2, -height, width, height);
   } else {
-    drawPlaceholder(config, Boolean(note), baseSize);
+    drawPlaceholder(config, mouthOpen, baseSize);
   }
   ctx.restore();
+}
+
+// Force a 2-frame closed mouth at the start of any note that follows another with no
+// real gap (consecutive/legato notes), so runs re-articulate instead of holding open.
+function isMouthOpen(track, note, time) {
+  if (!note || !track) return false;
+  const fps = clamp(Number(els.fps.value) || 60, 12, 60);
+  const gapTol = 1 / fps;
+  const reart = track.notes.some((n) => n.start < note.start && n.end >= note.start - gapTol);
+  if (reart && (time - note.start) < 2 / fps) return false;
+  return true;
 }
 
 function drawPlaceholder(config, isOpen, size) {
@@ -536,6 +546,72 @@ function seededTilt(time, index, pitch, maxTilt) {
   return (seed - Math.floor(seed) - 0.5) * 2 * maxTilt;
 }
 
+// Easing for the tilt/height transitions (must stay identical to NativeRenderer).
+const DYNAMICS_ATTACK = 0.05;  // seconds to ease in when a note starts (faster upward stretch)
+const DYNAMICS_RELEASE = 0.18; // seconds to ease out after a note ends
+
+function smoothstep01(x) {
+  const t = Math.max(0, Math.min(1, x));
+  return t * t * (3 - 2 * t);
+}
+
+// Continuous tilt direction in [-1, 1]: the old per-1/8s random value, interpolated
+// across each bucket with smoothstep so the tilt eases instead of snapping.
+function tiltDirection(time, index, pitch) {
+  const dir = (bucket) => {
+    const seed = Math.sin((bucket + 1) * 9898.233 + index * 313.7 + pitch * 19.19) * 43758.5453;
+    return (seed - Math.floor(seed) - 0.5) * 2;
+  };
+  const f = time * 8;
+  const b = Math.floor(f);
+  return dir(b) + (dir(b + 1) - dir(b)) * smoothstep01(f - b);
+}
+
+// Eased height (pitchStretch) and tilt. Attack when a note starts, release after it ends.
+function characterDynamics(track, time, index, maxTilt) {
+  const attack = DYNAMICS_ATTACK;
+  const release = DYNAMICS_RELEASE;
+  const targetStretch = (pitch) => 1 + clamp((pitch - 55) / 24, -1, 1) * 0.2; // 55 = G3 base pitch
+
+  // Deviation (pitchStretch - 1) and tilt left by a note's release tail at `time`.
+  const releaseDevTilt = (note) => {
+    if (!note) return { dev: 0, tilt: 0 };
+    const relProg = (time - note.end) / release;
+    if (relProg < 0 || relProg >= 1) return { dev: 0, tilt: 0 };
+    const attackAtEnd = smoothstep01((note.end - note.start) / attack);
+    const env = attackAtEnd * (1 - smoothstep01(relProg));
+    return {
+      dev: (targetStretch(note.pitch) - 1) * env,
+      tilt: tiltDirection(time, index, note.pitch) * maxTilt * env,
+    };
+  };
+
+  if (!track) return { pitchStretch: 1, tilt: 0 };
+  const active = track.notes.filter((n) => n.start <= time && n.end > time);
+  if (active.length) {
+    const note = active.reduce((h, c) => (c.pitch > h.pitch ? c : h));
+    // Crossfade from the height/tilt the previous note still has at this moment into
+    // this note's target, so a new note grows from the current height (no instant jump).
+    const attackProg = smoothstep01((time - note.start) / attack);
+    const targetDev = targetStretch(note.pitch) - 1;
+    const targetTilt = tiltDirection(time, index, note.pitch) * maxTilt;
+    const before = track.notes.filter((n) => n.end <= note.start);
+    const prev = before.length ? before.reduce((a, b) => (b.end > a.end ? b : a)) : null;
+    const residual = releaseDevTilt(prev);
+    return {
+      pitchStretch: 1 + residual.dev + (targetDev - residual.dev) * attackProg,
+      tilt: residual.tilt + (targetTilt - residual.tilt) * attackProg,
+    };
+  }
+  const ended = track.notes.filter((n) => n.end <= time && time < n.end + release);
+  if (ended.length) {
+    const note = ended.reduce((a, b) => (b.end > a.end ? b : a));
+    const r = releaseDevTilt(note);
+    return { pitchStretch: 1 + r.dev, tilt: r.tilt };
+  }
+  return { pitchStretch: 1, tilt: 0 };
+}
+
 function playPreview() {
   if (!song || playing) return;
   playing = true;
@@ -584,23 +660,79 @@ async function renderVideo() {
   if (!song) return;
   stopPreview();
   resizeCanvas();
+  await renderVideoNative();
+}
+
+async function renderVideoNative() {
   if (location.protocol === "file:") {
     setStatus("请通过本地服务打开页面才能导出 MOV：node server.js", true);
     return;
   }
   els.renderBtn.disabled = true;
   try {
-    setStatus("正在提交项目到本地渲染器。");
+    setStatus("正在启动原生 GPU 渲染……");
     const payload = await buildRenderPayload();
-    setStatus("本地服务正在渲染并编码 MOV，请保持页面打开。");
-    const response = await fetch("/render-mov", {
+    const startResponse = await fetch("/render-mov", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!response.ok) throw new Error(await response.text());
-    const { id } = await response.json();
+    if (!startResponse.ok) throw new Error(await startResponse.text());
+    const { id } = await startResponse.json();
     const output = await waitForRender(id);
+    // The renderer already wrote the file to disk. ProRes 4K files are huge (often
+    // many GB), so do NOT force a browser re-download into the Downloads folder —
+    // that is what triggered "无法写文件". Just surface the saved path + a manual link.
+    els.downloadLink.href = output.url;
+    els.downloadLink.download = output.filename;
+    els.downloadLink.hidden = false;
+    setStatus(`MOV 已生成并保存在本地：${output.path}（文件较大，已直接存盘，无需重复下载）`);
+  } catch (error) {
+    setStatus(error.message || "MOV 导出失败。", true);
+  } finally {
+    els.renderBtn.disabled = false;
+  }
+}
+
+async function renderVideoFromBrowserCanvas() {
+  if (location.protocol === "file:") {
+    setStatus("请通过本地服务打开页面才能导出 MOV：node server.js", true);
+    return;
+  }
+  els.renderBtn.disabled = true;
+  try {
+    const transparent = els.transparentExport.checked;
+    const fps = clamp(Number(els.fps.value) || 60, 12, 60);
+    const startResponse = await fetch("/export-start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fps, transparent }),
+    });
+    if (!startResponse.ok) throw new Error(await startResponse.text());
+    const { id } = await startResponse.json();
+    const totalFrames = Math.ceil(song.duration * fps);
+
+    for (let frame = 0; frame < totalFrames; frame += 1) {
+      const time = frame / fps;
+      drawFrame(time, { transparent });
+      els.seek.value = String(time);
+      updateTime(time);
+      const percent = Math.floor(((frame + 1) / totalFrames) * 100);
+      setStatus(`所见即所得导出 MOV：${percent}%（${frame + 1} / ${totalFrames} 帧）`);
+      const blob = await canvasToBlob("image/png");
+      const upload = await fetch(`/export-frame?id=${encodeURIComponent(id)}&index=${frame}`, {
+        method: "POST",
+        headers: { "content-type": "image/png" },
+        body: blob,
+      });
+      if (!upload.ok) throw new Error(await upload.text());
+      await nextPaint();
+    }
+
+    setStatus("正在合成 MOV，请保持页面打开。");
+    const finishResponse = await fetch(`/export-finish?id=${encodeURIComponent(id)}`, { method: "POST" });
+    if (!finishResponse.ok) throw new Error(await finishResponse.text());
+    const output = await finishResponse.json();
     const link = document.createElement("a");
     link.href = output.url;
     link.download = output.filename;
@@ -614,6 +746,19 @@ async function renderVideo() {
   } finally {
     els.renderBtn.disabled = false;
   }
+}
+
+function canvasToBlob(type, quality) {
+  return new Promise((resolve, reject) => {
+    els.canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("无法生成视频帧。"));
+    }, type, quality);
+  });
+}
+
+function nextPaint() {
+  return new Promise((resolve) => requestAnimationFrame(resolve));
 }
 
 async function waitForRender(id) {
