@@ -9,7 +9,7 @@ const { createCanvas, loadImage, GlobalFonts } = require("@napi-rs/canvas");
 
 const root = __dirname;
 const port = Number(process.env.PORT || 8787);
-const ffmpeg = process.env.FFMPEG || "/opt/homebrew/bin/ffmpeg";
+const ffmpeg = process.env.FFMPEG || "ffmpeg";
 const exportsDir = path.join(root, "exports");
 const nativeRenderer = path.join(root, ".build/release/NativeRenderer");
 const exportJobs = new Map();
@@ -57,7 +57,21 @@ createServer(async (req, res) => {
   }
 }).listen(port, () => {
   console.log(`MOV exporter running at http://localhost:${port}`);
+  detectFfmpeg();
 });
+
+function detectFfmpeg() {
+  const child = spawn(ffmpeg, ["-version"], { stdio: ["ignore", "ignore", "pipe"] });
+  child.on("error", () => {
+    console.warn(
+      `[warn] ffmpeg 未找到（命令: ${ffmpeg}）。原生渲染器不可用时的回退导出将失败。`,
+    );
+    console.warn(`       请安装 ffmpeg 或通过 FFMPEG 环境变量指定路径。`);
+  });
+  child.on("close", (code) => {
+    if (code === 0) console.log(`ffmpeg ok: ${ffmpeg}`);
+  });
+}
 
 async function renderMovStart(req, res) {
   const project = JSON.parse((await readBody(req)).toString("utf8"));
@@ -98,8 +112,20 @@ async function renderMovJob(project, job) {
   const output = path.join(exportsDir, filename);
   const projectPath = path.join(os.tmpdir(), `midi-characters-${job.id}.json`);
   await fs.writeFile(projectPath, JSON.stringify(project));
-  await runNativeRenderer(projectPath, output, job);
-  await fs.rm(projectPath, { force: true });
+  try {
+    await runNativeRenderer(projectPath, output, job);
+  } catch (error) {
+    // Native renderer only builds on macOS (Metal + AVFoundation). On Linux / Windows
+    // or when not built, fall back to the @napi-rs/canvas + ffmpeg path so the app
+    // stays cross-platform.
+    if (error?.code === "ENOENT" || error?.code === "EACCES") {
+      await renderMovJobLegacy(project, job, output);
+    } else {
+      throw error;
+    }
+  } finally {
+    await fs.rm(projectPath, { force: true });
+  }
   job.status = "done";
   job.output = {
     url: `/exports/${filename}`,
@@ -134,10 +160,7 @@ async function runNativeRenderer(projectPath, output, job) {
   });
 }
 
-async function renderMovJobLegacy(project, job) {
-  await fs.mkdir(exportsDir, { recursive: true });
-  const filename = `midi-characters-${new Date().toISOString().replace(/[:.]/g, "-")}.mov`;
-  const output = path.join(exportsDir, filename);
+async function renderMovJobLegacy(project, job, output) {
   const width = Number(project.width) || 3840;
   const height = Number(project.height) || 2160;
   const fps = Number(project.fps) || 60;
@@ -188,15 +211,10 @@ async function renderMovJobLegacy(project, job) {
     const pixels = ctx.getImageData(0, 0, width, height).data;
     await writeToStream(child.stdin, Buffer.from(pixels.buffer, pixels.byteOffset, pixels.byteLength));
     job.frame = frame + 1;
+    job.totalFrames = totalFrames;
   }
   child.stdin.end();
   await done;
-  job.status = "done";
-  job.output = {
-    url: `/exports/${filename}`,
-    path: output,
-    filename,
-  };
 }
 
 async function loadAssets(project) {
