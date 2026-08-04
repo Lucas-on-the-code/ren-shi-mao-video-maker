@@ -210,66 +210,104 @@ function makeConfig(track, index, total) {
   };
 }
 
+
 function renderTrackControls() {
   els.tracks.innerHTML = "";
   song.tracks.forEach((track, index) => {
     const config = configs[index];
     const card = document.createElement("article");
     card.className = "track";
+    // 每个卡片独立维护展开状态
+    const isExpanded = config._expanded == true; // 默认关闭
+
+    // 将轨道内容分为头部和可折叠区域
     card.innerHTML = `
-      <div class="track-head">
-        <div class="track-name" title="${escapeHtml(config.name)}">${escapeHtml(config.name)}</div>
-        <div class="track-notes">${track.notes.length} notes</div>
+      <div class="track-header" data-track-index="${index}">
+        <div class="track-head">
+          <div class="track-name" title="${escapeHtml(config.name)}">${escapeHtml(config.name)}</div>
+          <div class="track-notes">${track.notes.length} notes</div>
+        </div>
+        <button class="track-toggle" type="button" aria-expanded="${isExpanded}">
+          ${isExpanded ? '▼' : '▶'}
+        </button>
       </div>
-      <div class="preview">
-        <label>
-          <span>闭嘴图</span>
-          <input data-kind="closedImage" type="file" accept="image/*" />
-          <div class="swatch" data-swatch="closedImage">未选择</div>
-        </label>
-        <label>
-          <span>张嘴图</span>
-          <input data-kind="openImage" type="file" accept="image/*" />
-          <div class="swatch" data-swatch="openImage">未选择</div>
-        </label>
-      </div>
-      <div class="grid">
-        <label>
-          <span>X 位置</span>
-          <input data-kind="x" type="range" min="0" max="${els.canvas.width}" value="${config.x}" step="1" />
-        </label>
-        <label>
-          <span>Y 位置</span>
-          <input data-kind="y" type="range" min="0" max="${els.canvas.height}" value="${config.y}" step="1" />
-        </label>
-        <label>
-          <span>缩放</span>
-          <input data-kind="scale" type="range" min="0.1" max="5" value="${config.scale}" step="0.01" />
-        </label>
-        <label>
-          <span>Tilt 上限</span>
-          <input data-kind="tilt" type="range" min="0" max="28" value="${config.tilt}" step="1" />
-        </label>
+      <div class="track-body" style="display: ${isExpanded ? 'block' : 'none'};">
+        <div class="preview">
+          <label>
+            <span>闭嘴图</span>
+            <input data-kind="closedImage" type="file" accept="image/*" />
+            <div class="swatch" data-swatch="closedImage">未选择</div>
+          </label>
+          <label>
+            <span>张嘴图</span>
+            <input data-kind="openImage" type="file" accept="image/*" />
+            <div class="swatch" data-swatch="openImage">未选择</div>
+          </label>
+        </div>
+        <div class="grid">
+          <label>
+            <span>X 位置</span>
+            <input data-kind="x" type="range" min="0" max="${els.canvas.width}" value="${config.x}" step="1" />
+          </label>
+          <label>
+            <span>Y 位置</span>
+            <input data-kind="y" type="range" min="0" max="${els.canvas.height}" value="${config.y}" step="1" />
+          </label>
+          <label>
+            <span>缩放</span>
+            <input data-kind="scale" type="range" min="0.1" max="5" value="${config.scale}" step="0.01" />
+          </label>
+          <label>
+            <span>Tilt 上限</span>
+            <input data-kind="tilt" type="range" min="0" max="28" value="${config.tilt}" step="1" />
+          </label>
+        </div>
       </div>
     `;
 
-    for (const input of card.querySelectorAll("input")) {
+    // ---- 绑定折叠事件 ----
+    const header = card.querySelector(".track-header");
+    const body = card.querySelector(".track-body");
+    const toggleBtn = card.querySelector(".track-toggle");
+
+    function toggleExpand() {
+      const isCurrentlyExpanded = body.style.display !== "none";
+      const newExpanded = !isCurrentlyExpanded;
+      body.style.display = newExpanded ? "block" : "none";
+      toggleBtn.textContent = newExpanded ? "▼" : "▶";
+      toggleBtn.setAttribute("aria-expanded", String(newExpanded));
+      config._expanded = newExpanded; // 记住状态
+      saveState(); // 保存状态到 localStorage
+    }
+
+    header.addEventListener("click", toggleExpand);
+
+    // ---- 绑定输入控件 ----
+    for (const input of card.querySelectorAll("input:not(.track-toggle)")) {
       input.addEventListener("input", (event) => updateConfig(event, index, card));
       input.addEventListener("change", (event) => updateConfig(event, index, card));
     }
+
+    // ---- 恢复图片预览 ----
     for (const kind of ["closedImage", "openImage"]) {
-      if (!config[kind]) continue;
-      const swatch = card.querySelector(`[data-swatch="${kind}"]`);
-      renderSwatch(swatch, config[kind]);
+      if (config[kind]) {
+        const swatch = card.querySelector(`[data-swatch="${kind}"]`);
+        renderSwatch(swatch, config[kind]);
+      }
     }
     for (const kind of ["closedImage", "openImage"]) {
       if (config[kind]) continue;
       const inherited = imageForKind(kind);
-      if (inherited) renderSwatch(card.querySelector(`[data-swatch="${kind}"]`), inherited, "默认");
+      if (inherited) {
+        const swatch = card.querySelector(`[data-swatch="${kind}"]`);
+        renderSwatch(swatch, inherited, "默认");
+      }
     }
+
     els.tracks.appendChild(card);
   });
 }
+
 
 async function updateConfig(event, index, card) {
   const input = event.currentTarget;

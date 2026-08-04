@@ -119,7 +119,11 @@ canvas.dragging {
   border-left: 1px solid var(--line);
   background: var(--panel);
   padding: 20px;
-  overflow: auto;
+  /* overflow: auto; */
+
+  height: 100vh;
+  overflow: hidden;
+  overflow-y: scroll;
 }
 
 header h1 {
@@ -261,12 +265,16 @@ input[type="range"] {
   padding: 12px;
 }
 
+.track-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
 .track-head {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
   gap: 10px;
-  margin-bottom: 12px;
 }
 
 .track-name {
@@ -302,7 +310,7 @@ input[type="range"] {
 .swatch {
   display: grid;
   place-items: center;
-  height: 56px;
+  /* height: 56px; */
   border: 1px dashed var(--line);
   border-radius: 6px;
   background: #101316;
