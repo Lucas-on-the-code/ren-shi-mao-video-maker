@@ -372,6 +372,7 @@ function drawFrame(time, options = {}) {
     const active = activeNotes(track, time);
     const note = active.length ? active.reduce((highest, current) => (current.pitch > highest.pitch ? current : highest)) : null;
     drawCharacter(config, note, time, index);
+    drawLyric(config, track, time); // 页面预览歌词
   });
 }
 
