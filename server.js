@@ -13,6 +13,7 @@ const ffmpeg = process.env.FFMPEG || "ffmpeg";
 const exportsDir = path.join(root, "exports");
 const nativeRenderer = path.join(root, ".build/release/NativeRenderer");
 const exportJobs = new Map();
+const apiKey = process.env.API_KEY;
 const CHARACTER_SIZE_RATIO = 0.3;
 const LYRIC_FLOAT_DURATION = 0.7;
 const LYRIC_HOLD_DURATION = 2;
@@ -30,6 +31,15 @@ const mime = {
 
 createServer(async (req, res) => {
   try {
+    const isApiRoute = req.url !== "/" && !req.url?.startsWith("/assets") && !req.url?.match(/\.(html|css|js|woff2)$/);
+    if (apiKey && isApiRoute) {
+      const auth = req.headers["x-api-key"];
+      if (auth !== apiKey) {
+        res.writeHead(401, { "content-type": "text/plain; charset=utf-8" });
+        res.end("Unauthorized");
+        return;
+      }
+    }
     if (req.method === "POST" && req.url === "/render-mov") {
       await renderMovStart(req, res);
       return;
