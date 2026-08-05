@@ -995,7 +995,7 @@ async function restoreState() {
       els.volume.value = state.volume ?? els.volume.value;
       els.transparentExport.checked = Boolean(state.transparentExport);
       els.lyricColor.value = state.lyricColor ?? els.lyricColor.value;
-      els.lyricOpacity.value = state.lyricOpacity ?? els.lyricColor.value;  // 新增
+      els.lyricOpacity.value = state.lyricOpacity ?? els.lyricOpacity.value;
       els.lyricFont.value = state.lyricFont ?? els.lyricFont.value;
       els.lyricHeight.value = state.lyricHeight ?? els.lyricHeight.value;
     }

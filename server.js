@@ -325,7 +325,7 @@ function drawServerLyric(ctx, canvas, project, config, track, time) {
   if (alpha <= 0) return;
 
   // 读取透明度滑块的值，与 alpha 相乘
-  const opacity = Number(project.lyricOpacity) ?? 1;
+  const opacity = Number(project.lyricOpacity ?? 1);
   const finalAlpha = alpha * opacity;
 
   const size = Math.min(canvas.width, canvas.height) * CHARACTER_SIZE_RATIO * config.scale;
