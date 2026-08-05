@@ -22,6 +22,7 @@ const els = {
   defaultClosedSwatch: document.getElementById("defaultClosedSwatch"),
   defaultOpenSwatch: document.getElementById("defaultOpenSwatch"),
   lyricColor: document.getElementById("lyricColor"),
+  lyricOpacity: document.getElementById("lyricOpacity"), // 新增
   lyricFont: document.getElementById("lyricFont"),
   lyricHeight: document.getElementById("lyricHeight"),
   downloadLink: document.getElementById("downloadLink"),
@@ -90,7 +91,8 @@ for (const input of [els.videoWidth, els.videoHeight]) {
   input.addEventListener("change", resizeCanvas);
 }
 
-for (const input of [els.videoWidth, els.videoHeight, els.fps, els.volume, els.transparentExport, els.lyricColor, els.lyricFont, els.lyricHeight]) {
+// 在事件监听列表中添加 lyricOpacity
+for (const input of [els.videoWidth, els.videoHeight, els.fps, els.volume, els.transparentExport, els.lyricColor, els.lyricOpacity, els.lyricFont, els.lyricHeight]) {
   input.addEventListener("input", saveState);
   input.addEventListener("change", saveState);
 }
@@ -479,6 +481,11 @@ function drawLyric(config, track, time) {
   const alpha = age <= fadeStart ? 1 : 1 - clamp((age - fadeStart) / LYRIC_FADE_DURATION, 0, 1);
   if (alpha <= 0) return;
 
+  // 在 drawLyric 函数中，将 ctx.globalAlpha = alpha; 改为同时乘以透明度滑块的值
+  // 获取透明度滑块的值，并与 alpha 相乘
+  const opacity = Number(els.lyricOpacity.value);
+  const finalAlpha = alpha * opacity;
+
   const size = Math.min(els.canvas.width, els.canvas.height) * CHARACTER_SIZE_RATIO * config.scale;
   const x = clamp(config.x, 18, els.canvas.width - 18);
   const y = Math.max(32, config.y - size - 28 - Number(els.lyricHeight.value) - eased * 120);
@@ -490,7 +497,7 @@ function drawLyric(config, track, time) {
   const textY = y - lines.length * lineHeight;
 
   ctx.save();
-  ctx.globalAlpha = alpha;
+  ctx.globalAlpha = finalAlpha;
   ctx.fillStyle = els.lyricColor.value;
   ctx.font = lyricFont;
   ctx.textAlign = "center";
@@ -788,6 +795,7 @@ async function buildRenderPayload() {
     duration: song.duration,
     transparent: els.transparentExport.checked,
     lyricColor: els.lyricColor.value,
+    lyricOpacity: Number(els.lyricOpacity.value),  // 新增
     lyricFont: els.lyricFont.value,
     lyricHeight: Number(els.lyricHeight.value),
     tracks: song.tracks.map((track) => ({
@@ -962,6 +970,7 @@ function saveState() {
       volume: els.volume.value,
       transparentExport: els.transparentExport.checked,
       lyricColor: els.lyricColor.value,
+      lyricOpacity: els.lyricOpacity.value,
       lyricFont: els.lyricFont.value,
       lyricHeight: els.lyricHeight.value,
       configs: configs.map((config) => ({
@@ -986,6 +995,7 @@ async function restoreState() {
       els.volume.value = state.volume ?? els.volume.value;
       els.transparentExport.checked = Boolean(state.transparentExport);
       els.lyricColor.value = state.lyricColor ?? els.lyricColor.value;
+      els.lyricOpacity.value = state.lyricOpacity ?? els.lyricColor.value;  // 新增
       els.lyricFont.value = state.lyricFont ?? els.lyricFont.value;
       els.lyricHeight.value = state.lyricHeight ?? els.lyricHeight.value;
     }
